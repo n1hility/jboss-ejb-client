@@ -24,11 +24,17 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.security.GeneralSecurityException;
 import java.security.PrivilegedAction;
 
 import javax.ejb.CreateException;
+import javax.net.ssl.SSLContext;
 
+import org.jboss.ejb.client.AbstractInvocationContext;
+import org.jboss.ejb.client.AbstractReceiverInvocationContext;
+import org.jboss.ejb.client.Affinity;
 import org.jboss.ejb.client.AttachmentKey;
+import org.jboss.ejb.client.ClusterAffinity;
 import org.jboss.ejb.client.EJBReceiver;
 import org.jboss.ejb.client.EJBReceiverContext;
 import org.jboss.ejb.client.EJBReceiverInvocationContext;
@@ -41,9 +47,13 @@ import org.jboss.remoting3.ClientServiceHandle;
 import org.jboss.remoting3.Connection;
 import org.jboss.remoting3.ConnectionPeerIdentity;
 import org.jboss.remoting3.Endpoint;
+import org.jboss.remoting3._private.Messages;
 import org.wildfly.common.Assert;
 import org.wildfly.common.annotation.NotNull;
+import org.wildfly.security.auth.client.AuthenticationConfiguration;
 import org.wildfly.security.auth.client.AuthenticationContext;
+import org.wildfly.security.auth.client.AuthenticationContextConfigurationClient;
+import org.xnio.FailedIoFuture;
 import org.xnio.IoFuture;
 import org.xnio.OptionMap;
 
@@ -122,7 +132,7 @@ class RemoteEJBReceiver extends EJBReceiver {
 
     protected void processInvocation(final EJBReceiverInvocationContext receiverContext) throws Exception {
         final AuthenticationContext authenticationContext = receiverContext.getAuthenticationContext();
-        final IoFuture<ConnectionPeerIdentity> futureConnection = getConnection(receiverContext.getClientInvocationContext().getDestination(), authenticationContext);
+        final IoFuture<ConnectionPeerIdentity> futureConnection = getConnection(receiverContext.getClientInvocationContext(), receiverContext.getClientInvocationContext().getDestination(), authenticationContext);
         // this actually causes the invocation to move forward
         futureConnection.addNotifier(notifier, receiverContext);
     }
@@ -140,7 +150,7 @@ class RemoteEJBReceiver extends EJBReceiver {
         final StatelessEJBLocator<?> statelessLocator = context.getClientInvocationContext().getLocator().asStateless();
         final AuthenticationContext authenticationContext = context.getAuthenticationContext();
         try {
-            IoFuture<ConnectionPeerIdentity> futureConnection = getConnection(context.getClientInvocationContext().getDestination(), authenticationContext);
+            IoFuture<ConnectionPeerIdentity> futureConnection = getConnection(context.getClientInvocationContext(), context.getClientInvocationContext().getDestination(), authenticationContext);
             final ConnectionPeerIdentity identity = futureConnection.getInterruptibly();
             final EJBClientChannel ejbClientChannel = getClientChannel(identity.getConnection());
             final StatefulEJBLocator<?> result = ejbClientChannel.openSession(statelessLocator, identity, context.getClientInvocationContext());
@@ -170,7 +180,13 @@ class RemoteEJBReceiver extends EJBReceiver {
         }
     }
 
-    private IoFuture<ConnectionPeerIdentity> getConnection(final URI target, @NotNull AuthenticationContext authenticationContext) throws Exception {
+    private IoFuture<ConnectionPeerIdentity> getConnection(final AbstractInvocationContext context, final URI target, @NotNull AuthenticationContext authenticationContext) throws Exception {
+        Affinity affinity = context.getLocator().getAffinity();
+        if (affinity instanceof ClusterAffinity) {
+            String cluster = ((ClusterAffinity) affinity).getClusterName();
+            return doPrivileged((PrivilegedAction<IoFuture<ConnectionPeerIdentity>>) () ->
+                    discoveredNodeRegistry.getConnectedIdentityUsingClusterEffective(Endpoint.getCurrent(), target, "ejb", "jboss", authenticationContext, cluster));
+        }
         return doPrivileged((PrivilegedAction<IoFuture<ConnectionPeerIdentity>>) () -> Endpoint.getCurrent().getConnectedIdentity(target, "ejb", "jboss", authenticationContext));
     }
 }
